@@ -14,7 +14,7 @@ Options:
       (do not insert contents of .css file into a style tag)
   --add=[tag1,attr1/tag2,attr2/...]:
       Add optional pair of tag and attribute, which will be included into a file.
-  -a [tag1,attr/tag2,attr2/...:
+  -a [tag1,attr/tag2,attr2/...]:
       The same as "--add"
   --input=[input file]:
       set input html file
