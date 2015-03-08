@@ -89,7 +89,7 @@ help = do
 	options = [("--no-script", "Do not merge JavaScript file \n      (do not insert contents of .js files into a script tag)"),
                    ("--no-css", "Do not merge CSS file \n      (do not insert contents of .css files into a style tag)"),
                    ("--add=[tag1,attr1/tag2,attr2/...]", "Add optional pair of tag and attribute, which will be included into a file."),
-                   ("-a [tag1,attr/tag2,attr2/...", "The same as \"--add\""),
+                   ("-a [tag1,attr/tag2,attr2/...]", "The same as \"--add\""),
                    ("--input=[input file]", "Designate input html file name"),
  		   ("-i [input file]", "The same as \"--input\""),
                    ("--output=[output file]", "Designate output html file path"),
