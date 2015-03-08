@@ -1,0 +1,6 @@
+.*~
+.*.swap
+.*#
+cabal.sandbox.config
+.cabal-sandbox/
+dist/
