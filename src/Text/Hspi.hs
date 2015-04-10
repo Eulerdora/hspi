@@ -16,18 +16,18 @@ module Text.Hspi (
 
 import Control.Applicative
 import Data.List (partition, isPrefixOf)
-import qualified Data.ByteString.Lazy.Char8 as BS
-import Network.HTTP
-import Network.Browser
-import Network.HTTP.Proxy
+import qualified Data.ByteString.Lazy.Char8 as BLS
+import qualified Data.ByteString.Char8 as BS (pack)
+import Network.HTTP.Conduit
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Tree
+import Text.Regex.Posix
 import System.Directory
 import System.Environment
 import System.FilePath.Posix
 
 data Options = Options {
-	         inputFile :: FilePath,
+           inputFile :: FilePath,
                  outputFile :: FilePath,
                  rootPath :: FilePath, 
                  importers :: [Importer]
@@ -49,8 +49,8 @@ customOption path = Options {
                        importers = []
                      }
 
-type Converter = TagTree BS.ByteString -> IO (TagTree BS.ByteString)
-type Importer = FilePath -> TagTree BS.ByteString -> IO (TagTree BS.ByteString)
+type Converter = TagTree BLS.ByteString -> IO (TagTree BLS.ByteString)
+type Importer = FilePath -> TagTree BLS.ByteString -> IO (TagTree BLS.ByteString)
 
 -- read the index.html under the directory, and 
 -- insert all the source files' contents into it.
@@ -60,11 +60,11 @@ mergeFiles opts = do
       inFile = inputFile opts
       outFile = outputFile opts
       imps = importers opts
-  src <- BS.readFile $ getRelativePath root inFile
+  src <- BLS.readFile $ getRelativePath root inFile
   let html = tagTree $ parseTags src
   merged <- mapM (tagImporter root imps) html
   outFile' <- checkFilePath outFile
-  BS.writeFile outFile' . renderTags $ flattenTree merged
+  BLS.writeFile outFile' . renderTags $ flattenTree merged
 
 checkFilePath :: FilePath -> IO (FilePath)
 checkFilePath path = do
@@ -84,7 +84,7 @@ checkFilePath path = do
       flg <- doesFileExist nextPath
       if flg 
         then avoidDupPath path (cnt+1)
-	else return nextPath
+        else return nextPath
 
 -- join root path and relative path
 getRelativePath :: FilePath -> FilePath -> FilePath
@@ -116,13 +116,13 @@ unionImporters path xs = unionConverters $ map ($ path) xs
 generalImporter :: String -> String -> Importer
 generalImporter tagName attrName = converter
   where 
-    attrF = partition ((== (BS.pack attrName)) . fst) 
+    attrF = partition ((== (BLS.pack attrName)) . fst) 
     converter root (TagBranch tagName' attrs ts)
-      | (BS.pack tagName) == tagName' = 
+      | (BLS.pack tagName) == tagName' = 
           case attrF attrs of
             ([], xs) -> (TagBranch tagName' xs) <$> mapM (converter root) ts
-	    ((y:_), xs) -> do
-               src <- getSrcFile root $ BS.unpack $ snd y
+            ((y:_), xs) -> do
+               src <- getSrcFile root $ BLS.unpack $ snd y
                let innerTextTag = TagLeaf $ TagText src
                (TagBranch tagName' xs) <$> (innerTextTag:) <$> mapM (converter root) ts
       | otherwise = (TagBranch tagName' attrs) <$> mapM (converter root) ts 
@@ -134,15 +134,15 @@ scriptImporter = generalImporter "script" "src"
 cssImporter :: Importer
 cssImporter = converter
   where 
-    attrF = partition ((== (BS.pack "href")) . fst) 
+    attrF = partition ((== (BLS.pack "href")) . fst) 
     converter root (TagBranch tagName' attrs ts) 
-      | (BS.pack "link") == tagName' = 
+      | (BLS.pack "link") == tagName' = 
           case attrF attrs of
             ([], xs) -> (TagBranch tagName' xs) <$> mapM (converter root) ts
-	    ((y:_), _) -> do
-               src <- getSrcFile root $ BS.unpack $ snd y
+            ((y:_), _) -> do
+               src <- getSrcFile root $ BLS.unpack $ snd y
                let innerTextTag = TagLeaf $ TagText src
-               (TagBranch (BS.pack "style") [(BS.pack "type", BS.pack "text/css")]) <$> (innerTextTag:) <$> mapM (converter root) ts
+               (TagBranch (BLS.pack "style") [(BLS.pack "type", BLS.pack "text/css")]) <$> (innerTextTag:) <$> mapM (converter root) ts
       | otherwise = (TagBranch tagName' attrs) <$> mapM (converter root) ts
     converter _ leaf@(TagLeaf _) = return leaf
 
@@ -150,18 +150,34 @@ cssImporter = converter
 -- If the source path is HTTP/HTTPS Protocol, 
 -- it'll get the file over network.
 -- Otherwise, it reads the local file path.
-getSrcFile :: String -> String -> IO BS.ByteString
+getSrcFile :: String -> String -> IO BLS.ByteString
 getSrcFile root path 
   | isUrl path = do
       env <- lookupEnv (if isHTTP path then "HTTP_PROXY" else "HTTPS_PROXY")   
-      resp <- browse $ do
-	case env >>= parseProxy of
-          Just proxy -> setProxy proxy
-	  Nothing -> return ()
-        request $ getRequest path 
-      return . BS.pack . rspBody $ snd resp
-   | otherwise = BS.readFile $ getRelativePath root path
+      let mProxy = do
+            env' <- env
+            (pt, url, port) <- decompUrl env'
+            return $ Proxy (BS.pack url) port
+      req' <- (parseUrl path) 
+      let req = req' { proxy = mProxy }
+      res <- withManager $ httpLbs req
+      return $ responseBody res
+   | otherwise = BLS.readFile $ getRelativePath root path
   where
     isUrl str = "http:" `isPrefixOf` str || "https:" `isPrefixOf` str
     isHTTP str = "http:" `isPrefixOf` str
 
+decompUrl :: String -> Maybe (String, String, Int)
+decompUrl path = do
+      (pt, url, port) <- triple
+      if length port > 0
+        then return (pt, url, read $ tail port)
+        else if pt == "https"
+               then return (pt, url, 443)
+               else return (pt, url, 80)
+  where 
+    triple = let (_, _, _, xs) = path =~ ("([a-z]+)://([a-zA-Z0-9\\.]*)(:[0-9]+)?/?" :: String) :: (String, String, String, [String])
+             in if length xs > 0
+                  then Just (xs !! 1, xs !! 2, xs !! 3)
+                  else Nothing  
+  
