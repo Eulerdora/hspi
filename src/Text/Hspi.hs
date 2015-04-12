@@ -15,10 +15,16 @@ module Text.Hspi (
 ) where
 
 import Control.Applicative
+import Control.Lens
+import Data.Maybe (fromJust, isJust)
+import Data.Aeson.Lens (_String, key)
 import Data.List (partition, isPrefixOf)
 import qualified Data.ByteString.Lazy.Char8 as BLS
 import qualified Data.ByteString.Char8 as BS (pack)
-import Network.HTTP.Conduit
+import qualified Data.ByteString.Base64 as B64
+import qualified Network.Wreq as W
+import OpenSSL.Session (context)
+import Network.HTTP.Client.OpenSSL
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Tree
 import Text.Regex.Posix
@@ -154,30 +160,57 @@ getSrcFile :: String -> String -> IO BLS.ByteString
 getSrcFile root path 
   | isUrl path = do
       env <- lookupEnv (if isHTTP path then "HTTP_PROXY" else "HTTPS_PROXY")   
-      let mProxy = do
+      let mProxyInfo = do
             env' <- env
-            (pt, url, port) <- decompUrl env'
-            return $ Proxy (BS.pack url) port
-      req' <- (parseUrl path) 
-      let req = req' { proxy = mProxy }
-      res <- withManager $ httpLbs req
-      return $ responseBody res
+            decompUrl env'
+          mProxy = do
+            (_, _, _, proxyUrl, port) <- mProxyInfo
+            return $ W.Proxy (BS.pack proxyUrl) port
+          mAuth = do
+            (_, user, pass, _, _) <- mProxyInfo
+            if length user > 0
+              then return . B64.encode $ BS.pack (user ++ ":" ++ pass)
+              else Nothing
+          opts' = if isJust mProxy
+                    then W.defaults & W.proxy ?~ (fromJust mProxy)
+                    else W.defaults
+          opts = if isJust mAuth
+                   then opts' & W.header "Proxy-Authorization" .~ [(fromJust mAuth)]
+                   else opts'
+      putStrLn $ show opts
+      putStrLn $ "Downloading a file from " ++ path
+      case getProtocol path of
+        Just "http" -> do
+          res <- W.getWith opts path
+          return $ res ^. W.responseBody
+        Just "https" -> do
+          res <- withOpenSSL $ W.getWith opts path
+          return $ res ^. W.responseBody
+        _ -> error $ "Can't get remote file. url: " ++ path
    | otherwise = BLS.readFile $ getRelativePath root path
   where
     isUrl str = "http:" `isPrefixOf` str || "https:" `isPrefixOf` str
     isHTTP str = "http:" `isPrefixOf` str
+    getProtocol str = if isUrl str
+                        then if "http:" `isPrefixOf` str
+                               then Just "http"
+                               else if "https:" `isPrefixOf` str
+                                      then Just "https"
+                                      else Nothing
+                        else Nothing
 
-decompUrl :: String -> Maybe (String, String, Int)
+decompUrl :: String -> Maybe (String, String, String, String, Int)
 decompUrl path = do
-      (pt, url, port) <- triple
+      (protocol, user, pass, url, port) <- urlInfo
       if length port > 0
-        then return (pt, url, read $ tail port)
-        else if pt == "https"
-               then return (pt, url, 443)
-               else return (pt, url, 80)
+        then return (protocol, user, pass, url, read port)
+        else case protocol of 
+               "https" -> return (protocol, user, pass, url, 443)
+               "http" -> return (protocol, user, pass, url, 80)
+               _ -> Nothing
   where 
-    triple = let (_, _, _, xs) = path =~ ("([a-z]+)://([a-zA-Z0-9\\.]*)(:[0-9]+)?/?" :: String) :: (String, String, String, [String])
-             in if length xs > 0
-                  then Just (xs !! 1, xs !! 2, xs !! 3)
-                  else Nothing  
-  
+    urlInfo = let (_, _, _, xs) = path =~ ("([a-z]+)://(([a-zA-Z0-9_\\-]+):([a-zA-Z0-9_\\-]+)@)?([a-zA-Z0-9\\.]*)(:([0-9]+))?/?" :: String) 
+                                  :: (String, String, String, [String])
+              in if length xs > 0
+                   then Just (xs !! 0, xs !! 2, xs !! 3, xs !! 4, xs !! 6)
+                   else Nothing
